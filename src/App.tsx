@@ -1,67 +1,31 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { Authenticator } from "@aws-amplify/ui-react";
-import { generateClient } from "aws-amplify/data";
-import type { Schema } from "../amplify/data/resource";
+import JobSearch from "./JobSearch";
+import ProfilePage from "./ProfilePage";
+import {
+  STATUSES,
+  STATUS_LABELS,
+  blank,
+  client,
+  errorText,
+  formatSalary,
+  normalizeCompanyName,
+  normalizeUrl,
+} from "./lib";
+import type { AppEvent, Application, Company, Message, Posting, Profile, Status } from "./lib";
 
-const client = generateClient<Schema>();
-
-type Company = Schema["Company"]["type"];
-type Application = Schema["Application"]["type"];
-type AppEvent = Schema["ApplicationEvent"]["type"];
-type Status = NonNullable<Application["status"]>;
-
-const STATUSES: Status[] = [
-  "SAVED",
-  "APPLIED",
-  "SCREENING",
-  "INTERVIEWING",
-  "OFFER",
-  "ACCEPTED",
-  "REJECTED",
-  "WITHDRAWN",
-];
-
-const STATUS_LABELS: Record<Status, string> = {
-  SAVED: "Saved",
-  APPLIED: "Applied",
-  SCREENING: "Screening",
-  INTERVIEWING: "Interviewing",
-  OFFER: "Offer",
-  ACCEPTED: "Accepted",
-  REJECTED: "Rejected",
-  WITHDRAWN: "Withdrawn",
-};
+type Tab = "tracker" | "search" | "profile";
 
 const EMPTY_COMPANY = { name: "", city: "", state: "", website: "" };
-const EMPTY_APP = { roleTitle: "", status: "APPLIED" as Status, appliedAt: "", contactName: "", contactEmail: "", notes: "" };
-
-// Turns "RTX Corporation", "RTX Corp." and "rtx" into the same key so duplicates merge.
-function normalizeCompanyName(name: string): string {
-  const cleaned = name
-    .toLowerCase()
-    .replace(/[.,'"&()!]/g, " ")
-    .replace(/\b(the|inc|incorporated|corp|corporation|llc|ltd|co|company|group)\b/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return cleaned || name.toLowerCase().trim();
-}
-
-// Empty form fields must be sent as undefined; empty strings fail URL/email validation.
-function blank(value: string): string | undefined {
-  const trimmed = value.trim();
-  return trimmed === "" ? undefined : trimmed;
-}
-
-function normalizeUrl(value: string): string | undefined {
-  const trimmed = blank(value);
-  if (!trimmed) return undefined;
-  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
-}
-
-function errorText(errors: { message: string }[] | undefined): string | null {
-  return errors && errors.length ? errors.map((e) => e.message).join("; ") : null;
-}
+const EMPTY_APP = {
+  roleTitle: "",
+  status: "APPLIED" as Status,
+  appliedAt: "",
+  contactName: "",
+  contactEmail: "",
+  notes: "",
+};
 
 export default function App() {
   return (
@@ -74,7 +38,12 @@ export default function App() {
 }
 
 function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void }) {
+  const [tab, setTab] = useState<Tab>("tracker");
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [profileLoaded, setProfileLoaded] = useState(false);
+  const [profileDirty, setProfileDirty] = useState(false);
   const [companies, setCompanies] = useState<Company[]>([]);
+  const [postings, setPostings] = useState<Posting[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
   const [events, setEvents] = useState<AppEvent[]>([]);
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
@@ -82,13 +51,23 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
   const [companyForm, setCompanyForm] = useState(EMPTY_COMPANY);
   const [appForm, setAppForm] = useState(EMPTY_APP);
   const [noteText, setNoteText] = useState("");
-  const [message, setMessage] = useState<{ kind: "error" | "info"; text: string } | null>(null);
+  const [message, setMessage] = useState<Message | null>(null);
 
   // Live subscriptions: lists update automatically when data changes.
   useEffect(() => {
     const onError = (e: unknown) => setMessage({ kind: "error", text: `Could not load data: ${String(e)}` });
     const subs = [
+      client.models.Profile.observeQuery().subscribe({
+        next: ({ items, isSynced }) => {
+          // One profile per user; if duplicates ever exist, use the oldest.
+          const sorted = [...items].sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
+          setProfile(sorted[0] ?? null);
+          if (isSynced) setProfileLoaded(true);
+        },
+        error: onError,
+      }),
       client.models.Company.observeQuery().subscribe({ next: ({ items }) => setCompanies([...items]), error: onError }),
+      client.models.Posting.observeQuery().subscribe({ next: ({ items }) => setPostings([...items]), error: onError }),
       client.models.Application.observeQuery().subscribe({ next: ({ items }) => setApplications([...items]), error: onError }),
       client.models.ApplicationEvent.observeQuery().subscribe({ next: ({ items }) => setEvents([...items]), error: onError }),
     ];
@@ -106,6 +85,8 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
     return counts;
   }, [applications]);
 
+  const postingsById = useMemo(() => new Map(postings.map((p) => [p.id, p])), [postings]);
+
   const selectedCompany = companies.find((c) => c.id === selectedCompanyId) ?? null;
 
   const companyApps = useMemo(
@@ -120,6 +101,12 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
     return events
       .filter((e) => e.applicationId === appId)
       .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
+  }
+
+  function openCompany(companyId: string) {
+    setTab("tracker");
+    setSelectedCompanyId(companyId);
+    setExpandedAppId(null);
   }
 
   async function logEvent(applicationId: string, eventType: AppEvent["eventType"], summary: string, details?: string) {
@@ -173,6 +160,9 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
       return;
     }
     if (!window.confirm(`Delete ${company.name}?`)) return;
+    for (const p of postings.filter((p) => p.companyId === company.id)) {
+      await client.models.Posting.delete({ id: p.id });
+    }
     const { errors } = await client.models.Company.delete({ id: company.id });
     const err = errorText(errors);
     if (err) setMessage({ kind: "error", text: err });
@@ -228,6 +218,7 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
     setNoteText("");
   }
 
+  // Deletes the application, its timeline, and its posting if nothing else uses it.
   async function deleteApplication(app: Application) {
     if (!window.confirm(`Delete the ${app.roleTitle} application and its timeline?`)) return;
     for (const ev of eventsFor(app.id)) {
@@ -235,15 +226,44 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
     }
     const { errors } = await client.models.Application.delete({ id: app.id });
     const err = errorText(errors);
-    if (err) setMessage({ kind: "error", text: err });
+    if (err) {
+      setMessage({ kind: "error", text: err });
+      return;
+    }
+    if (app.postingId && !applications.some((a) => a.id !== app.id && a.postingId === app.postingId)) {
+      await client.models.Posting.delete({ id: app.postingId });
+    }
   }
 
   return (
     <div className="shell">
       <header className="topbar">
         <h1>Job tracker</h1>
+        <nav className="tabs" aria-label="Sections">
+          <button
+            className={`tab ${tab === "tracker" ? "active" : ""}`}
+            aria-current={tab === "tracker" ? "page" : undefined}
+            onClick={() => setTab("tracker")}
+          >
+            Tracker
+          </button>
+          <button
+            className={`tab ${tab === "search" ? "active" : ""}`}
+            aria-current={tab === "search" ? "page" : undefined}
+            onClick={() => setTab("search")}
+          >
+            Find jobs
+          </button>
+          <button
+            className={`tab ${tab === "profile" ? "active" : ""}`}
+            aria-current={tab === "profile" ? "page" : undefined}
+            onClick={() => setTab("profile")}
+          >
+            Profile{profileDirty ? " (unsaved)" : ""}
+          </button>
+        </nav>
         <div className="account">
-          <span>{email}</span>
+          <span>{profile?.fullName || email}</span>
           <button className="ghost" onClick={onSignOut}>Sign out</button>
         </div>
       </header>
@@ -251,214 +271,255 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
       {message && (
         <div className={`message ${message.kind}`} role="status">
           <span>{message.text}</span>
-          <button className="ghost" onClick={() => setMessage(null)} aria-label="Dismiss">Dismiss</button>
+          <button className="ghost" onClick={() => setMessage(null)}>Dismiss</button>
         </div>
       )}
 
-      <div className="layout">
-        <aside className="companies">
-          <h2>Companies</h2>
-          <form onSubmit={addCompany} className="stack">
-            <input
-              placeholder="Company name"
-              value={companyForm.name}
-              onChange={(e) => setCompanyForm({ ...companyForm, name: e.target.value })}
-            />
-            <div className="row">
+      {/* All tabs stay mounted and are only hidden, so search results and
+          unsaved profile edits survive switching tabs. */}
+      <div hidden={tab !== "profile"}>
+        <ProfilePage
+          profile={profile}
+          loaded={profileLoaded}
+          onMessage={setMessage}
+          onSaved={setProfile}
+          onDirtyChange={setProfileDirty}
+        />
+      </div>
+
+      <div hidden={tab !== "search"}>
+        <JobSearch
+          profile={profile}
+          profileLoaded={profileLoaded}
+          companies={companies}
+          postings={postings}
+          onMessage={setMessage}
+          onOpenCompany={openCompany}
+          onOpenProfile={() => setTab("profile")}
+        />
+      </div>
+
+      <div hidden={tab !== "tracker"}>
+        <div className="layout">
+          <aside className="panel companies">
+            <h2>Companies</h2>
+            <form onSubmit={addCompany} className="stack">
               <input
-                placeholder="City"
-                value={companyForm.city}
-                onChange={(e) => setCompanyForm({ ...companyForm, city: e.target.value })}
+                placeholder="Company name"
+                value={companyForm.name}
+                onChange={(e) => setCompanyForm({ ...companyForm, name: e.target.value })}
               />
-              <input
-                placeholder="State"
-                className="short"
-                value={companyForm.state}
-                onChange={(e) => setCompanyForm({ ...companyForm, state: e.target.value })}
-              />
-            </div>
-            <input
-              placeholder="Website (optional)"
-              value={companyForm.website}
-              onChange={(e) => setCompanyForm({ ...companyForm, website: e.target.value })}
-            />
-            <button type="submit">Add company</button>
-          </form>
-
-          {sortedCompanies.length === 0 ? (
-            <p className="empty">Add a company you're interested in to start tracking applications.</p>
-          ) : (
-            <ul className="company-list">
-              {sortedCompanies.map((c) => (
-                <li key={c.id}>
-                  <button
-                    className={`company-item ${c.id === selectedCompanyId ? "active" : ""}`}
-                    onClick={() => {
-                      setSelectedCompanyId(c.id);
-                      setExpandedAppId(null);
-                    }}
-                  >
-                    <span className="company-name">{c.name}</span>
-                    <span className="company-meta">
-                      {[c.city, c.state].filter(Boolean).join(", ") || "No location"}
-                      {" / "}
-                      {appCountByCompany[c.id] ?? 0} applications
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </aside>
-
-        <main className="detail">
-          {!selectedCompany ? (
-            <p className="empty">Select a company to see and add applications.</p>
-          ) : (
-            <>
-              <div className="detail-head">
-                <div>
-                  <h2>{selectedCompany.name}</h2>
-                  <p className="company-meta">
-                    {[selectedCompany.city, selectedCompany.state].filter(Boolean).join(", ") || "No location"}
-                    {selectedCompany.website && (
-                      <>
-                        {" / "}
-                        <a href={selectedCompany.website} target="_blank" rel="noreferrer">Website</a>
-                      </>
-                    )}
-                  </p>
-                </div>
-                <button className="ghost danger" onClick={() => deleteCompany(selectedCompany)}>Delete company</button>
-              </div>
-
-              <form onSubmit={addApplication} className="app-form">
-                <h3>Add an application</h3>
-                <div className="row">
-                  <input
-                    placeholder="Role title"
-                    value={appForm.roleTitle}
-                    onChange={(e) => setAppForm({ ...appForm, roleTitle: e.target.value })}
-                  />
-                  <select
-                    value={appForm.status}
-                    onChange={(e) => setAppForm({ ...appForm, status: e.target.value as Status })}
-                  >
-                    {STATUSES.map((s) => (
-                      <option key={s} value={s}>{STATUS_LABELS[s]}</option>
-                    ))}
-                  </select>
-                  <input
-                    type="date"
-                    aria-label="Date applied"
-                    value={appForm.appliedAt}
-                    onChange={(e) => setAppForm({ ...appForm, appliedAt: e.target.value })}
-                  />
-                </div>
-                <div className="row">
-                  <input
-                    placeholder="Contact name (optional)"
-                    value={appForm.contactName}
-                    onChange={(e) => setAppForm({ ...appForm, contactName: e.target.value })}
-                  />
-                  <input
-                    type="email"
-                    placeholder="Contact email (optional)"
-                    value={appForm.contactEmail}
-                    onChange={(e) => setAppForm({ ...appForm, contactEmail: e.target.value })}
-                  />
-                </div>
-                <textarea
-                  placeholder="Notes (optional)"
-                  rows={2}
-                  value={appForm.notes}
-                  onChange={(e) => setAppForm({ ...appForm, notes: e.target.value })}
+              <div className="row">
+                <input
+                  placeholder="City"
+                  value={companyForm.city}
+                  onChange={(e) => setCompanyForm({ ...companyForm, city: e.target.value })}
                 />
-                <button type="submit">Add application</button>
-              </form>
+                <input
+                  placeholder="State"
+                  className="short"
+                  value={companyForm.state}
+                  onChange={(e) => setCompanyForm({ ...companyForm, state: e.target.value })}
+                />
+              </div>
+              <input
+                placeholder="Website (optional)"
+                value={companyForm.website}
+                onChange={(e) => setCompanyForm({ ...companyForm, website: e.target.value })}
+              />
+              <button type="submit">Add company</button>
+            </form>
 
-              {companyApps.length === 0 ? (
-                <p className="empty">No applications at {selectedCompany.name} yet.</p>
-              ) : (
-                <ul className="app-list">
-                  {companyApps.map((app) => {
-                    const status = (app.status ?? "SAVED") as Status;
-                    const expanded = expandedAppId === app.id;
-                    return (
-                      <li key={app.id} className="app-item">
-                        <div className="app-row">
-                          <button
-                            className="app-title"
-                            aria-expanded={expanded}
-                            onClick={() => {
-                              setExpandedAppId(expanded ? null : app.id);
-                              setNoteText("");
-                            }}
-                          >
-                            <span>{app.roleTitle}</span>
-                            <span className="company-meta">
-                              {app.appliedAt ? `Applied ${app.appliedAt}` : "No apply date"}
-                            </span>
-                          </button>
-                          <select
-                            className={`status status-${status.toLowerCase()}`}
-                            value={status}
-                            aria-label="Status"
-                            onChange={(e) => changeStatus(app, e.target.value as Status)}
-                          >
-                            {STATUSES.map((s) => (
-                              <option key={s} value={s}>{STATUS_LABELS[s]}</option>
-                            ))}
-                          </select>
-                        </div>
+            {sortedCompanies.length === 0 ? (
+              <p className="empty">Add a company here, or save jobs from Find jobs.</p>
+            ) : (
+              <ul className="company-list">
+                {sortedCompanies.map((c) => (
+                  <li key={c.id}>
+                    <button
+                      className={`company-item ${c.id === selectedCompanyId ? "active" : ""}`}
+                      onClick={() => openCompany(c.id)}
+                    >
+                      <span className="company-name">{c.name}</span>
+                      <span className="company-meta">
+                        {[c.city, c.state].filter(Boolean).join(", ") || "No location"}
+                        {" / "}
+                        {appCountByCompany[c.id] ?? 0} applications
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </aside>
 
-                        {expanded && (
-                          <div className="app-detail">
-                            {(app.contactName || app.contactEmail) && (
-                              <p className="company-meta">
-                                Contact: {[app.contactName, app.contactEmail].filter(Boolean).join(", ")}
-                              </p>
-                            )}
-                            {app.notes && <p>{app.notes}</p>}
+          <main className="panel detail">
+            {!selectedCompany ? (
+              <p className="empty">Select a company to see and add applications.</p>
+            ) : (
+              <>
+                <div className="detail-head">
+                  <div>
+                    <h2>{selectedCompany.name}</h2>
+                    <p className="company-meta">
+                      {[selectedCompany.city, selectedCompany.state].filter(Boolean).join(", ") || "No location"}
+                      {selectedCompany.website && (
+                        <>
+                          {" / "}
+                          <a href={selectedCompany.website} target="_blank" rel="noreferrer">Website</a>
+                        </>
+                      )}
+                    </p>
+                  </div>
+                  <button className="ghost danger" onClick={() => deleteCompany(selectedCompany)}>
+                    Delete company
+                  </button>
+                </div>
 
-                            <h4>Timeline</h4>
-                            <ol className="timeline">
-                              {eventsFor(app.id).map((ev) => (
-                                <li key={ev.id}>
-                                  <time>{new Date(ev.occurredAt).toLocaleString()}</time>
-                                  <span>{ev.summary}</span>
-                                  {ev.details && <p>{ev.details}</p>}
-                                </li>
-                              ))}
-                            </ol>
+                <form onSubmit={addApplication} className="app-form">
+                  <h3>Add an application</h3>
+                  <div className="row">
+                    <input
+                      placeholder="Role title"
+                      value={appForm.roleTitle}
+                      onChange={(e) => setAppForm({ ...appForm, roleTitle: e.target.value })}
+                    />
+                    <select
+                      value={appForm.status}
+                      aria-label="Status"
+                      onChange={(e) => setAppForm({ ...appForm, status: e.target.value as Status })}
+                    >
+                      {STATUSES.map((s) => (
+                        <option key={s} value={s}>{STATUS_LABELS[s]}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="date"
+                      aria-label="Date applied"
+                      value={appForm.appliedAt}
+                      onChange={(e) => setAppForm({ ...appForm, appliedAt: e.target.value })}
+                    />
+                  </div>
+                  <div className="row">
+                    <input
+                      placeholder="Contact name (optional)"
+                      value={appForm.contactName}
+                      onChange={(e) => setAppForm({ ...appForm, contactName: e.target.value })}
+                    />
+                    <input
+                      type="email"
+                      placeholder="Contact email (optional)"
+                      value={appForm.contactEmail}
+                      onChange={(e) => setAppForm({ ...appForm, contactEmail: e.target.value })}
+                    />
+                  </div>
+                  <textarea
+                    placeholder="Notes (optional)"
+                    rows={2}
+                    value={appForm.notes}
+                    onChange={(e) => setAppForm({ ...appForm, notes: e.target.value })}
+                  />
+                  <button type="submit">Add application</button>
+                </form>
 
-                            <div className="row">
-                              <input
-                                placeholder="Add a note to the timeline"
-                                value={noteText}
-                                onChange={(e) => setNoteText(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    addNote(app);
-                                  }
-                                }}
-                              />
-                              <button onClick={() => addNote(app)}>Add note</button>
-                            </div>
-                            <button className="ghost danger" onClick={() => deleteApplication(app)}>
-                              Delete application
+                {companyApps.length === 0 ? (
+                  <p className="empty">No applications at {selectedCompany.name} yet.</p>
+                ) : (
+                  <ul className="app-list">
+                    {companyApps.map((app) => {
+                      const status = (app.status ?? "SAVED") as Status;
+                      const expanded = expandedAppId === app.id;
+                      const posting = app.postingId ? postingsById.get(app.postingId) : undefined;
+                      return (
+                        <li key={app.id} className="app-item">
+                          <div className="app-row">
+                            <button
+                              className="app-title"
+                              aria-expanded={expanded}
+                              onClick={() => {
+                                setExpandedAppId(expanded ? null : app.id);
+                                setNoteText("");
+                              }}
+                            >
+                              <span>{app.roleTitle}</span>
+                              <span className="company-meta">
+                                {app.appliedAt ? `Applied ${app.appliedAt}` : "Not applied yet"}
+                                {posting?.isRemote ? " / Remote" : ""}
+                              </span>
                             </button>
+                            <select
+                              className={`status status-${status.toLowerCase()}`}
+                              value={status}
+                              aria-label="Status"
+                              onChange={(e) => changeStatus(app, e.target.value as Status)}
+                            >
+                              {STATUSES.map((s) => (
+                                <option key={s} value={s}>{STATUS_LABELS[s]}</option>
+                              ))}
+                            </select>
                           </div>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </>
-          )}
-        </main>
+
+                          {expanded && (
+                            <div className="app-detail">
+                              {posting && (
+                                <p className="company-meta">
+                                  {[posting.locationName, formatSalary(posting.salaryMin, posting.salaryMax, posting.salaryIsEstimated)]
+                                    .filter(Boolean)
+                                    .join(" / ")}
+                                  {posting.url && (
+                                    <>
+                                      {" / "}
+                                      <a href={posting.url} target="_blank" rel="noreferrer">View posting</a>
+                                    </>
+                                  )}
+                                </p>
+                              )}
+                              {(app.contactName || app.contactEmail) && (
+                                <p className="company-meta">
+                                  Contact: {[app.contactName, app.contactEmail].filter(Boolean).join(", ")}
+                                </p>
+                              )}
+                              {app.notes && <p>{app.notes}</p>}
+
+                              <h4>Timeline</h4>
+                              <ol className="timeline">
+                                {eventsFor(app.id).map((ev) => (
+                                  <li key={ev.id}>
+                                    <time>{new Date(ev.occurredAt).toLocaleString()}</time>
+                                    <span>{ev.summary}</span>
+                                    {ev.details && <p>{ev.details}</p>}
+                                  </li>
+                                ))}
+                              </ol>
+
+                              <div className="row">
+                                <input
+                                  placeholder="Add a note to the timeline"
+                                  value={noteText}
+                                  onChange={(e) => setNoteText(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                      e.preventDefault();
+                                      addNote(app);
+                                    }
+                                  }}
+                                />
+                                <button onClick={() => addNote(app)}>Add note</button>
+                              </div>
+                              <button className="ghost danger" onClick={() => deleteApplication(app)}>
+                                Delete application
+                              </button>
+                            </div>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </>
+            )}
+          </main>
+        </div>
       </div>
     </div>
   );
