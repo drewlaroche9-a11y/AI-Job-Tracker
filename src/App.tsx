@@ -3,13 +3,19 @@ import type { FormEvent } from "react";
 import { Authenticator } from "@aws-amplify/ui-react";
 import JobSearch from "./JobSearch";
 import ProfilePage from "./ProfilePage";
+import PipelineOverview from "./PipelineOverview";
 import {
+  DEFAULT_FOLLOW_UP_DAYS,
   STATUSES,
   STATUS_LABELS,
   blank,
   client,
+  daysSince,
+  describeError,
   errorText,
   formatSalary,
+  lastActivityAt,
+  needsFollowUp,
   normalizeCompanyName,
   normalizeUrl,
 } from "./lib";
@@ -29,7 +35,8 @@ const EMPTY_APP = {
 
 export default function App() {
   return (
-    <Authenticator>
+    // Sign-up is hidden because accounts are invite-only (see amplify/backend.ts).
+    <Authenticator hideSignUp>
       {({ signOut, user }) => (
         <Tracker email={user?.signInDetails?.loginId ?? ""} onSignOut={() => signOut?.()} />
       )}
@@ -55,7 +62,14 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
 
   // Live subscriptions: lists update automatically when data changes.
   useEffect(() => {
-    const onError = (e: unknown) => setMessage({ kind: "error", text: `Could not load data: ${String(e)}` });
+    // Name the table in the message so it's clear which live subscription failed.
+    const onError = (table: string) => (e: unknown) => {
+      console.error(`${table} subscription error`, e);
+      setMessage({
+        kind: "error",
+        text: `Live updates for ${table} stopped: ${describeError(e)}. Reload the page to reconnect.`,
+      });
+    };
     const subs = [
       client.models.Profile.observeQuery().subscribe({
         next: ({ items, isSynced }) => {
@@ -64,12 +78,12 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
           setProfile(sorted[0] ?? null);
           if (isSynced) setProfileLoaded(true);
         },
-        error: onError,
+        error: onError("Profile"),
       }),
-      client.models.Company.observeQuery().subscribe({ next: ({ items }) => setCompanies([...items]), error: onError }),
-      client.models.Posting.observeQuery().subscribe({ next: ({ items }) => setPostings([...items]), error: onError }),
-      client.models.Application.observeQuery().subscribe({ next: ({ items }) => setApplications([...items]), error: onError }),
-      client.models.ApplicationEvent.observeQuery().subscribe({ next: ({ items }) => setEvents([...items]), error: onError }),
+      client.models.Company.observeQuery().subscribe({ next: ({ items }) => setCompanies([...items]), error: onError("Company") }),
+      client.models.Posting.observeQuery().subscribe({ next: ({ items }) => setPostings([...items]), error: onError("Posting") }),
+      client.models.Application.observeQuery().subscribe({ next: ({ items }) => setApplications([...items]), error: onError("Application") }),
+      client.models.ApplicationEvent.observeQuery().subscribe({ next: ({ items }) => setEvents([...items]), error: onError("ApplicationEvent") }),
     ];
     return () => subs.forEach((s) => s.unsubscribe());
   }, []);
@@ -108,6 +122,21 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
     setSelectedCompanyId(companyId);
     setExpandedAppId(null);
   }
+
+  // Jumps to an application from the follow-up list, opened and ready to edit.
+  function openApplication(app: Application) {
+    setTab("tracker");
+    setSelectedCompanyId(app.companyId);
+    setExpandedAppId(app.id);
+    setNoteText("");
+  }
+
+  // Logging a follow-up counts as activity, so the reminder clears.
+  async function logFollowUp(app: Application) {
+    await logEvent(app.id, "FOLLOW_UP", "Followed up");
+  }
+
+  const followUpDays = profile?.followUpDays ?? DEFAULT_FOLLOW_UP_DAYS;
 
   async function logEvent(applicationId: string, eventType: AppEvent["eventType"], summary: string, details?: string) {
     const { errors } = await client.models.ApplicationEvent.create({
@@ -291,6 +320,8 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
         <JobSearch
           profile={profile}
           profileLoaded={profileLoaded}
+          profileDirty={profileDirty}
+          onProfileUpdated={setProfile}
           companies={companies}
           postings={postings}
           onMessage={setMessage}
@@ -300,6 +331,15 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
       </div>
 
       <div hidden={tab !== "tracker"}>
+        <PipelineOverview
+          applications={applications}
+          companies={companies}
+          events={events}
+          followUpDays={followUpDays}
+          onOpenApplication={openApplication}
+          onLogFollowUp={logFollowUp}
+        />
+
         <div className="layout">
           <aside className="panel companies">
             <h2>Companies</h2>
@@ -430,6 +470,7 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
                       const status = (app.status ?? "SAVED") as Status;
                       const expanded = expandedAppId === app.id;
                       const posting = app.postingId ? postingsById.get(app.postingId) : undefined;
+                      const stale = needsFollowUp(app, events, followUpDays);
                       return (
                         <li key={app.id} className="app-item">
                           <div className="app-row">
@@ -446,6 +487,11 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
                                 {app.appliedAt ? `Applied ${app.appliedAt}` : "Not applied yet"}
                                 {posting?.isRemote ? " / Remote" : ""}
                               </span>
+                              {stale && (
+                                <span className="badge badge-warn">
+                                  No activity for {daysSince(lastActivityAt(app, events))} days
+                                </span>
+                              )}
                             </button>
                             <select
                               className={`status status-${status.toLowerCase()}`}
@@ -461,6 +507,12 @@ function Tracker({ email, onSignOut }: { email: string; onSignOut: () => void })
 
                           {expanded && (
                             <div className="app-detail">
+                              {posting?.relevanceScore != null && (
+                                <p className="fit-reason">
+                                  Fit {Math.round(posting.relevanceScore)}/100
+                                  {posting.relevanceReason ? `: ${posting.relevanceReason}` : ""}
+                                </p>
+                              )}
                               {posting && (
                                 <p className="company-meta">
                                   {[posting.locationName, formatSalary(posting.salaryMin, posting.salaryMax, posting.salaryIsEstimated)]

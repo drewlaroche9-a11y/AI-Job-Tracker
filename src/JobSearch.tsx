@@ -1,11 +1,24 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { CLEARANCE_PATTERN, cleanList, client, daysAgo, errorText, formatSalary, unwrap } from "./lib";
-import type { Company, JobResult, Message, Posting, Profile } from "./lib";
+import {
+  CLEARANCE_PATTERN,
+  buildScoringProfile,
+  cleanList,
+  client,
+  daysAgo,
+  errorText,
+  fitBand,
+  formatSalary,
+  unwrap,
+} from "./lib";
+import type { Company, FitScore, JobResult, Message, Posting, Profile } from "./lib";
+import RoleSuggestions from "./RoleSuggestions";
 
 type Props = {
   profile: Profile | null;
   profileLoaded: boolean;
+  profileDirty: boolean;
+  onProfileUpdated: (profile: Profile) => void;
   companies: Company[];
   postings: Posting[];
   onMessage: (message: Message | null) => void;
@@ -14,6 +27,7 @@ type Props = {
 };
 
 type Filter = "all" | "onsite" | "remote";
+type SortBy = "fit" | "newest" | "source";
 
 const DISTANCES = [10, 25, 50, 100];
 
@@ -24,6 +38,8 @@ function closestDistance(miles: number): number {
 export default function JobSearch({
   profile,
   profileLoaded,
+  profileDirty,
+  onProfileUpdated,
   companies,
   postings,
   onMessage,
@@ -40,6 +56,10 @@ export default function JobSearch({
   const [savingId, setSavingId] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [prefilled, setPrefilled] = useState(false);
+  const [scores, setScores] = useState<Record<string, FitScore>>({});
+  const [scoring, setScoring] = useState(false);
+  const [sortBy, setSortBy] = useState<SortBy>("fit");
+  const searchRun = useRef(0); // ignores scores that arrive after a newer search started
 
   const targetRoles = cleanList(profile?.targetRoles);
   const hasClearance = Boolean(profile?.clearanceLevel && profile.clearanceLevel !== "NONE");
@@ -64,32 +84,96 @@ export default function JobSearch({
     return map;
   }, [postings]);
 
-  const visible = results.filter((r) =>
-    filter === "all" ? true : filter === "remote" ? Boolean(r.isRemote) : !r.isRemote
-  );
+  const hasScores = Object.keys(scores).length > 0;
+
+  const visible = useMemo(() => {
+    const list = results.filter((r) =>
+      filter === "all" ? true : filter === "remote" ? Boolean(r.isRemote) : !r.isRemote
+    );
+    if (sortBy === "fit" && hasScores) {
+      return [...list].sort((a, b) => (scores[b.sourceId]?.score ?? -1) - (scores[a.sourceId]?.score ?? -1));
+    }
+    if (sortBy === "newest") {
+      return [...list].sort((a, b) => (b.postedAt ?? "").localeCompare(a.postedAt ?? ""));
+    }
+    return list;
+  }, [results, filter, sortBy, scores, hasScores]);
   const remoteCount = results.filter((r) => r.isRemote).length;
 
-  async function search(e: FormEvent) {
+  // Sends the results and the profile to the score-jobs Lambda (Claude on Bedrock).
+  async function scoreResults(items: JobResult[], run: number) {
+    if (!profile || items.length === 0) return;
+    setScoring(true);
+    try {
+      const jobs = items.map((j) => ({
+        sourceId: j.sourceId,
+        title: j.title,
+        companyName: j.companyName,
+        locationName: j.locationName,
+        isRemote: j.isRemote,
+        salaryMin: j.salaryMin,
+        salaryMax: j.salaryMax,
+        salaryIsEstimated: j.salaryIsEstimated,
+        description: j.description,
+      }));
+      const { data, errors } = await client.queries.scoreJobs({
+        jobsJson: JSON.stringify(jobs),
+        profileJson: JSON.stringify(buildScoringProfile(profile)),
+      });
+      const err = errorText(errors);
+      if (err) throw new Error(err);
+      if (run !== searchRun.current) return;
+      const next: Record<string, FitScore> = {};
+      for (const s of data ?? []) {
+        if (s) next[s.sourceId] = { score: s.score ?? 0, reason: s.reason ?? "" };
+      }
+      setScores(next);
+      setSortBy("fit");
+    } catch (err) {
+      if (run === searchRun.current) {
+        onMessage({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+      }
+    } finally {
+      if (run === searchRun.current) setScoring(false);
+    }
+  }
+
+  function search(e: FormEvent) {
     e.preventDefault();
+    void runSearch(what);
+  }
+
+  // Used by the role suggestions: fill in the title and search right away.
+  function searchFor(query: string) {
+    setWhat(query);
+    void runSearch(query);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function runSearch(whatValue: string) {
     onMessage(null);
-    if (!what.trim() || !where.trim()) {
+    if (!whatValue.trim() || !where.trim()) {
       onMessage({ kind: "error", text: "Enter a job title and a location." });
       return;
     }
+    const run = ++searchRun.current;
     setLoading(true);
+    setScores({});
     try {
       const { data, errors } = await client.queries.searchJobs({
-        what: what.trim(),
+        what: whatValue.trim(),
         where: where.trim(),
         distance,
       });
       const err = errorText(errors);
       if (err) throw new Error(err);
-      setResults((data?.results ?? []).filter((r): r is JobResult => r != null));
+      const items = (data?.results ?? []).filter((r): r is JobResult => r != null);
+      setResults(items);
       setTotalCount(data?.totalCount ?? 0);
       setCached(Boolean(data?.cached));
       const pref = profile?.remotePreference;
       setFilter(pref === "REMOTE" ? "remote" : pref === "ONSITE" ? "onsite" : "all");
+      void scoreResults(items, run);
     } catch (err) {
       setResults([]);
       setTotalCount(null);
@@ -130,6 +214,8 @@ export default function JobSearch({
           latitude: job.latitude ?? undefined,
           longitude: job.longitude ?? undefined,
           isRemote: job.isRemote ?? false,
+          relevanceScore: scores[job.sourceId]?.score,
+          relevanceReason: scores[job.sourceId]?.reason || undefined,
           salaryMin: job.salaryMin ?? undefined,
           salaryMax: job.salaryMax ?? undefined,
           salaryIsEstimated: job.salaryIsEstimated ?? false,
@@ -175,6 +261,15 @@ export default function JobSearch({
           <button type="button" className="ghost" onClick={onOpenProfile}>Go to profile</button>
         </div>
       )}
+      <RoleSuggestions
+        profile={profile}
+        profileDirty={profileDirty}
+        onSearchRole={searchFor}
+        onProfileUpdated={onProfileUpdated}
+        onMessage={onMessage}
+        onOpenProfile={onOpenProfile}
+      />
+
       <form onSubmit={search} className="search-form">
         <input
           placeholder="Job title or keywords"
@@ -219,6 +314,15 @@ export default function JobSearch({
             {cached ? ", from a search made in the last 6 hours." : "."}
           </p>
           {results.length > 0 && (
+            <div className="result-controls">
+            <label className="sort">
+              <span>Sort</span>
+              <select value={sortBy} onChange={(e) => setSortBy(e.target.value as SortBy)}>
+                <option value="fit" disabled={!hasScores}>Best fit</option>
+                <option value="newest">Newest</option>
+                <option value="source">Adzuna order</option>
+              </select>
+            </label>
             <div className="filters" role="group" aria-label="Filter results">
               {(["all", "onsite", "remote"] as Filter[]).map((f) => (
                 <button
@@ -232,8 +336,14 @@ export default function JobSearch({
                 </button>
               ))}
             </div>
+            </div>
           )}
         </div>
+      )}
+
+      {scoring && <p className="company-meta scoring-note">Scoring how well each job fits your profile...</p>}
+      {totalCount !== null && totalCount > 0 && !profile && (
+        <p className="company-meta scoring-note">Fill in your profile to get AI fit scores for these results.</p>
       )}
 
       {totalCount === 0 && (
@@ -245,10 +355,19 @@ export default function JobSearch({
           const saved = savedBySourceId.get(job.sourceId);
           const duplicates = job.duplicateCount ?? 0;
           const needsClearance = CLEARANCE_PATTERN.test(`${job.title} ${job.description ?? ""}`);
+          const fit = scores[job.sourceId];
           return (
             <li key={job.sourceId} className="result">
               <div className="result-main">
-                <h3>{job.title}</h3>
+                <div className="result-title">
+                  {fit && (
+                    <span className={`fit fit-${fitBand(fit.score)}`} aria-label={`Fit score ${fit.score} out of 100`}>
+                      {fit.score}
+                    </span>
+                  )}
+                  <h3>{job.title}</h3>
+                </div>
+                {fit?.reason && <p className="fit-reason">{fit.reason}</p>}
                 <p className="result-company">
                   {job.companyName}
                   {job.isRemote && <span className="badge">Remote</span>}

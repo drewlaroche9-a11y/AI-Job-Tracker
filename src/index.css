@@ -158,6 +158,42 @@ button.danger { color: var(--danger); }
 .badge-warn { background: #fdf3e2; color: #8a5a10; }
 .role-chips { margin-top: 0.75rem; }
 
+/* AI fit scores */
+.result-controls { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.sort { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--muted); }
+.sort select { width: auto; padding: 0.25rem 0.4rem; font-size: 0.82rem; }
+.scoring-note { margin-top: 0.75rem; }
+.result-title { display: flex; align-items: center; gap: 0.6rem; }
+.fit {
+  flex: 0 0 auto; min-width: 2.4rem; text-align: center; font-weight: 600; font-size: 0.85rem;
+  padding: 0.15rem 0.4rem; border-radius: 4px; font-variant-numeric: tabular-nums;
+}
+.fit-high { background: #e6f4ec; color: #1f6b40; }
+.fit-mid  { background: #fdf3e2; color: #8a5a10; }
+.fit-low  { background: #f1f3f5; color: #4a5562; }
+.fit-reason { font-size: 0.86rem; margin: 0.2rem 0 0.15rem; }
+
+/* Role suggestions */
+.suggest-panel {
+  border: 1px solid var(--line); border-radius: 6px; padding: 0.9rem 1rem;
+  background: var(--paper); margin-bottom: 1rem;
+}
+.suggest-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+.suggest-actions { display: flex; gap: 0.5rem; align-items: center; }
+.suggest-groups { display: flex; flex-direction: column; gap: 1rem; margin-top: 0.9rem; }
+.suggest-group h4 { color: var(--ink); margin: 0 0 0.4rem; }
+.suggest-group ul { list-style: none; margin: 0; padding: 0; }
+.suggestion {
+  display: grid; grid-template-columns: 1fr auto; gap: 1rem; align-items: start;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+  padding: 0.7rem 0.85rem; margin-bottom: 0.5rem;
+}
+@media (max-width: 700px) { .suggestion { grid-template-columns: 1fr; } }
+.suggestion-title { font-weight: 600; margin: 0; }
+.suggestion-buttons { display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem; }
+@media (max-width: 700px) { .suggestion-buttons { align-items: flex-start; } }
+.pay-warn { color: #8a5a10; font-size: 0.82rem; margin: 0.15rem 0 0; }
+
 /* Profile */
 .profile { display: flex; flex-direction: column; gap: 1.25rem; }
 .profile-head { display: flex; justify-content: space-between; gap: 1.5rem; flex-wrap: wrap; }
@@ -189,3 +225,36 @@ legend { font-weight: 600; padding-right: 0.5rem; }
 
 /* Amplify login screen spacing */
 [data-amplify-authenticator] { margin-top: 3rem; }
+
+/* Pipeline overview and follow-ups */
+.pipeline { margin-bottom: 1.5rem; }
+.pipeline-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.stages {
+  list-style: none; margin: 0.9rem 0 0.4rem; padding: 0;
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.5rem;
+}
+@media (max-width: 700px) { .stages { grid-template-columns: repeat(3, 1fr); } }
+.stage { border-radius: 4px; padding: 0.6rem 0.7rem; display: flex; flex-direction: column; }
+.stage-count { font-size: 1.5rem; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.stage-label { font-size: 0.82rem; font-weight: 500; }
+.closed-stages { margin-bottom: 0.9rem; }
+.followups { border-top: 1px solid var(--line); padding-top: 0.75rem; }
+.followups h3 { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
+.followups ul { list-style: none; margin: 0; padding: 0; }
+.followup {
+  display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+  padding: 0.5rem 0; border-bottom: 1px solid var(--line);
+}
+.followup:last-child { border-bottom: none; }
+.followup-title {
+  display: flex; flex-direction: column; align-items: flex-start; text-align: left;
+  background: transparent; color: var(--ink); border: none; padding: 0.1rem 0; font-weight: 600;
+}
+.followup-title:hover span:first-child { text-decoration: underline; }
+.app-title .badge { margin-top: 0.25rem; }
+
+/* Resume upload */
+.resume-file { border: 1px dashed var(--line); border-radius: 4px; padding: 0.75rem 0.85rem; background: var(--paper); }
+.resume-current { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.resume-current > p { flex: 1 1 280px; margin: 0; }
+.resume-buttons { display: flex; gap: 0.4rem; flex-wrap: wrap; }

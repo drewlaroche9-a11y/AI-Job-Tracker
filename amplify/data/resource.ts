@@ -1,5 +1,7 @@
 import { type ClientSchema, a, defineData } from "@aws-amplify/backend";
 import { searchJobs } from "../functions/search-jobs/resource";
+import { scoreJobs } from "../functions/score-jobs/resource";
+import { suggestRoles } from "../functions/suggest-roles/resource";
 
 /*
  * Job tracker data model
@@ -11,6 +13,8 @@ import { searchJobs } from "../functions/search-jobs/resource";
  *
  * Profile          the user's job-search profile (one per user); input for search and AI matching
  * searchJobs       custom query backed by the search-jobs Lambda (Adzuna + cache)
+ * scoreJobs        custom query backed by the score-jobs Lambda (Claude on Bedrock + cache)
+ * suggestRoles     custom query backed by the suggest-roles Lambda (Claude + Adzuna market data)
  *
  * Every stored record is owner-scoped: users can only see and edit their own data.
  */
@@ -33,6 +37,7 @@ const schema = a.schema({
     "EMAIL_RECEIVED",
     "EMAIL_SENT",
     "INTERVIEW_SCHEDULED",
+    "FOLLOW_UP",
   ]),
 
   RemotePreference: a.enum(["ANY", "REMOTE", "HYBRID", "ONSITE"]),
@@ -56,6 +61,10 @@ const schema = a.schema({
       certifications: a.string().array(),
       preferredLocations: a.string().array(),
       resumeText: a.string(),
+      resumeFileName: a.string(),
+      resumeContentType: a.string(),
+      resumeUploadedAt: a.datetime(),
+      followUpDays: a.integer(),
     })
     .authorization((allow) => [allow.owner()]),
 
@@ -92,6 +101,7 @@ const schema = a.schema({
       salaryIsEstimated: a.boolean().default(false),
       postedAt: a.datetime(),
       relevanceScore: a.float(),
+      relevanceReason: a.string(),
       applications: a.hasMany("Application", "postingId"),
     })
     .authorization((allow) => [allow.owner()]),
@@ -161,6 +171,44 @@ const schema = a.schema({
     .returns(a.ref("JobSearchResponse"))
     .authorization((allow) => [allow.authenticated()])
     .handler(a.handler.function(searchJobs)),
+
+  JobScore: a.customType({
+    sourceId: a.string().required(),
+    score: a.integer(),
+    reason: a.string(),
+  }),
+
+  scoreJobs: a
+    .query()
+    .arguments({
+      jobsJson: a.string().required(),
+      profileJson: a.string().required(),
+    })
+    .returns(a.ref("JobScore").array())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(scoreJobs)),
+
+  RoleSuggestion: a.customType({
+    title: a.string().required(),
+    searchQuery: a.string().required(),
+    category: a.string().required(),
+    reason: a.string(),
+    gaps: a.string(),
+    openings: a.integer(),
+    averageSalary: a.float(),
+    marketArea: a.string(),
+  }),
+
+  suggestRoles: a
+    .query()
+    .arguments({
+      profileJson: a.string().required(),
+      radiusMiles: a.integer(),
+      refresh: a.boolean(),
+    })
+    .returns(a.ref("RoleSuggestion").array())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(suggestRoles)),
 });
 
 export type Schema = ClientSchema<typeof schema>;

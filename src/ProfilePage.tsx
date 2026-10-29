@@ -1,14 +1,25 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent, ReactNode } from "react";
+import type { ChangeEvent, FormEvent, KeyboardEvent, ReactNode } from "react";
 import {
   CLEARANCE_LABELS,
   EXPERIENCE_LABELS,
+  DEFAULT_FOLLOW_UP_DAYS,
   REMOTE_LABELS,
   blank,
   cleanList,
   client,
+  describeError,
   errorText,
 } from "./lib";
+import {
+  ACCEPTED_TYPES,
+  MAX_RESUME_BYTES,
+  deleteResume,
+  extractResumeText,
+  redactContactInfo,
+  resumeDownloadUrl,
+  uploadResume,
+} from "./resumeFile";
 import type { ClearanceLevel, ExperienceLevel, Message, Profile, RemotePreference } from "./lib";
 
 type Props = {
@@ -33,8 +44,13 @@ type Form = {
   certifications: string[];
   preferredLocations: string[];
   resumeText: string;
+  resumeFileName: string;
+  resumeContentType: string;
+  resumeUploadedAt: string;
+  followUpDays: number;
 };
 
+const FOLLOW_UP_OPTIONS = [7, 10, 14, 21];
 const RADIUS_OPTIONS = [10, 25, 50, 100];
 const RESUME_MAX_CHARS = 20000;
 
@@ -53,24 +69,37 @@ function toForm(p: Profile | null): Form {
     certifications: cleanList(p?.certifications),
     preferredLocations: cleanList(p?.preferredLocations),
     resumeText: p?.resumeText ?? "",
+    resumeFileName: p?.resumeFileName ?? "",
+    resumeContentType: p?.resumeContentType ?? "",
+    resumeUploadedAt: p?.resumeUploadedAt ?? "",
+    followUpDays: p?.followUpDays ?? DEFAULT_FOLLOW_UP_DAYS,
   };
 }
 
 export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDirtyChange }: Props) {
   const [form, setForm] = useState<Form>(() => toForm(profile));
+  const [baseline, setBaseline] = useState<Form>(() => toForm(profile));
   const [saving, setSaving] = useState(false);
-  const loadedProfileId = useRef<string | null>(profile?.id ?? null);
+  const [fileBusy, setFileBusy] = useState<"" | "uploading" | "removing" | "opening">("");
+  const fileInput = useRef<HTMLInputElement>(null);
+  const baselineRef = useRef<Form>(baseline);
+  const syncedVersion = useRef<string | null>(null);
 
-  // Fill the form once when the saved profile first arrives. Later updates
-  // never overwrite edits in progress.
+  // When the saved profile changes (first load, or an update from another tab such as
+  // "Add to target roles"), refresh the form, but only if there are no edits in progress.
   useEffect(() => {
-    if (profile && loadedProfileId.current !== profile.id) {
-      loadedProfileId.current = profile.id;
-      setForm(toForm(profile));
-    }
+    if (!profile) return;
+    const version = `${profile.id}|${profile.updatedAt}`;
+    if (syncedVersion.current === version) return;
+    syncedVersion.current = version;
+    const incoming = toForm(profile);
+    const previousBaseline = baselineRef.current;
+    setForm((current) => (JSON.stringify(current) === JSON.stringify(previousBaseline) ? incoming : current));
+    baselineRef.current = incoming;
+    setBaseline(incoming);
   }, [profile]);
 
-  const dirty = useMemo(() => JSON.stringify(form) !== JSON.stringify(toForm(profile)), [form, profile]);
+  const dirty = useMemo(() => JSON.stringify(form) !== JSON.stringify(baseline), [form, baseline]);
 
   // Let the app show "(unsaved)" on the tab, and warn before closing the browser tab.
   useEffect(() => {
@@ -94,6 +123,75 @@ export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDir
 
   function update<K extends keyof Form>(key: K, value: Form[K]) {
     setForm((f) => ({ ...f, [key]: value }));
+  }
+
+  // Upload a resume: store the file privately in S3, and fill in the resume text from it
+  // with email addresses and phone numbers removed. The profile is saved with the Save button.
+  async function onResumeChosen(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow choosing the same file again later
+    if (!file) return;
+    onMessage(null);
+
+    if (!ACCEPTED_TYPES.includes(file.type)) {
+      onMessage({ kind: "error", text: "Upload a PDF or a plain text (.txt) file." });
+      return;
+    }
+    if (file.size > MAX_RESUME_BYTES) {
+      onMessage({ kind: "error", text: "That file is over 5 MB. Try a smaller PDF." });
+      return;
+    }
+    if (form.resumeText.trim() && !window.confirm("Replace your current resume text with the text from this file?")) {
+      return;
+    }
+
+    setFileBusy("uploading");
+    try {
+      const extracted = await extractResumeText(file);
+      const { text, removed } = redactContactInfo(extracted);
+      await uploadResume(file);
+      setForm((f) => ({
+        ...f,
+        resumeText: text.slice(0, RESUME_MAX_CHARS),
+        resumeFileName: file.name,
+        resumeContentType: file.type,
+        resumeUploadedAt: new Date().toISOString(),
+      }));
+      const parts = [`Uploaded ${file.name} and filled in the resume text.`];
+      if (removed > 0) parts.push(`Removed ${removed} email address${removed === 1 ? "" : "es"} or phone number${removed === 1 ? "" : "s"}.`);
+      if (!text) parts.push("No text could be read from the file, so paste it in instead.");
+      parts.push("Check the text for other personal details, then save your profile.");
+      onMessage({ kind: "info", text: parts.join(" ") });
+    } catch (err) {
+      onMessage({ kind: "error", text: `Resume upload failed: ${describeError(err)}` });
+    } finally {
+      setFileBusy("");
+    }
+  }
+
+  async function viewResume() {
+    setFileBusy("opening");
+    try {
+      window.open(await resumeDownloadUrl(), "_blank", "noopener,noreferrer");
+    } catch (err) {
+      onMessage({ kind: "error", text: `Could not open the file: ${describeError(err)}` });
+    } finally {
+      setFileBusy("");
+    }
+  }
+
+  async function removeResumeFile() {
+    if (!window.confirm("Delete the uploaded resume file? Your resume text stays.")) return;
+    setFileBusy("removing");
+    try {
+      await deleteResume();
+      setForm((f) => ({ ...f, resumeFileName: "", resumeContentType: "", resumeUploadedAt: "" }));
+      onMessage({ kind: "info", text: "Resume file deleted. Save your profile to finish." });
+    } catch (err) {
+      onMessage({ kind: "error", text: `Could not delete the file: ${describeError(err)}` });
+    } finally {
+      setFileBusy("");
+    }
   }
 
   async function save(e: FormEvent) {
@@ -120,6 +218,10 @@ export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDir
       certifications: form.certifications,
       preferredLocations: form.preferredLocations,
       resumeText: blank(form.resumeText.slice(0, RESUME_MAX_CHARS)) ?? null,
+      resumeFileName: blank(form.resumeFileName) ?? null,
+      resumeContentType: blank(form.resumeContentType) ?? null,
+      resumeUploadedAt: blank(form.resumeUploadedAt) ?? null,
+      followUpDays: form.followUpDays,
     };
 
     setSaving(true);
@@ -135,9 +237,12 @@ export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDir
       // subscription, and reset the form to the cleaned-up saved values
       // (trimmed text, "60,000" stored as 60000) so it no longer looks unsaved.
       const saved = data as Profile;
-      loadedProfileId.current = saved.id;
+      const savedForm = toForm(saved);
+      syncedVersion.current = `${saved.id}|${saved.updatedAt}`;
+      baselineRef.current = savedForm;
+      setBaseline(savedForm);
+      setForm(savedForm);
       onSaved(saved);
-      setForm(toForm(saved));
       onMessage({ kind: "info", text: "Profile saved." });
     } catch (err) {
       onMessage({ kind: "error", text: err instanceof Error ? err.message : String(err) });
@@ -249,6 +354,19 @@ export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDir
               </select>
             )}
           </Field>
+          <Field label="Follow-up reminder" hint="Flag applications with no activity after this long">
+            {(id) => (
+              <select
+                id={id}
+                value={form.followUpDays}
+                onChange={(e) => update("followUpDays", Number(e.target.value))}
+              >
+                {FOLLOW_UP_OPTIONS.map((d) => (
+                  <option key={d} value={d}>After {d} days</option>
+                ))}
+              </select>
+            )}
+          </Field>
           <Field label="Work arrangement">
             {(id) => (
               <select
@@ -301,9 +419,49 @@ export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDir
 
       <fieldset>
         <legend>Resume</legend>
+        <div className="resume-file">
+          <input
+            ref={fileInput}
+            type="file"
+            accept=".pdf,.txt,application/pdf,text/plain"
+            hidden
+            onChange={onResumeChosen}
+          />
+          {form.resumeFileName ? (
+            <div className="resume-current">
+              <div>
+                <p className="suggestion-title">{form.resumeFileName}</p>
+                <p className="company-meta">
+                  {form.resumeUploadedAt ? `Uploaded ${new Date(form.resumeUploadedAt).toLocaleDateString()}` : ""}
+                  {" / stored privately, only you can open it"}
+                </p>
+              </div>
+              <div className="resume-buttons">
+                <button type="button" className="secondary" disabled={fileBusy !== ""} onClick={viewResume}>
+                  {fileBusy === "opening" ? "Opening..." : "View"}
+                </button>
+                <button type="button" className="secondary" disabled={fileBusy !== ""} onClick={() => fileInput.current?.click()}>
+                  {fileBusy === "uploading" ? "Uploading..." : "Replace"}
+                </button>
+                <button type="button" className="ghost danger" disabled={fileBusy !== ""} onClick={removeResumeFile}>
+                  {fileBusy === "removing" ? "Deleting..." : "Delete file"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="resume-current">
+              <p className="company-meta">
+                Upload a PDF or .txt resume to fill in the text below automatically. Email addresses and phone numbers are removed from the text before it's used for AI matching.
+              </p>
+              <button type="button" disabled={fileBusy !== ""} onClick={() => fileInput.current?.click()}>
+                {fileBusy === "uploading" ? "Reading and uploading..." : "Upload resume"}
+              </button>
+            </div>
+          )}
+        </div>
         <Field
           label="Resume text"
-          hint={`Paste the text of your resume. ${form.resumeText.length.toLocaleString()} of ${RESUME_MAX_CHARS.toLocaleString()} characters.`}
+          hint={`Paste or upload your resume. Remove references' names and contact details. ${form.resumeText.length.toLocaleString()} of ${RESUME_MAX_CHARS.toLocaleString()} characters.`}
         >
           {(id) => (
             <textarea
