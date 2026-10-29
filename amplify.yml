@@ -1,0 +1,22 @@
+version: 1
+backend:
+  phases:
+    build:
+      commands:
+        # npm install instead of npm ci: Amplify's packages bundle nested dependencies
+        # that make recent npm versions reject an otherwise valid lock file in npm ci.
+        - npm install --cache .npm --prefer-offline --no-audit --no-fund
+        - npx ampx pipeline-deploy --branch $AWS_BRANCH --app-id $AWS_APP_ID
+frontend:
+  phases:
+    build:
+      commands:
+        - npm run build
+  artifacts:
+    baseDirectory: dist
+    files:
+      - "**/*"
+  cache:
+    paths:
+      - .npm/**/*
+      - node_modules/**/*
