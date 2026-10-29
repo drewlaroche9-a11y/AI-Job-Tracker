@@ -286,7 +286,7 @@ export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDir
             {(id) => (
               <input
                 id={id}
-                placeholder="Cybersecurity student focused on SOC operations"
+                placeholder="One line about your background and goals"
                 value={form.headline}
                 onChange={(e) => update("headline", e.target.value)}
               />
@@ -305,7 +305,7 @@ export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDir
               </select>
             )}
           </Field>
-          <Field label="Security clearance" hint="Used to flag jobs that require one">
+          <Field label="Security clearance" hint="Only for government or defense jobs. Leave as None otherwise">
             {(id) => (
               <select
                 id={id}
@@ -326,7 +326,7 @@ export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDir
         <TagInput
           label="Target roles"
           hint="The first one prefills job searches"
-          placeholder="SOC analyst"
+          placeholder="A job title you want"
           values={form.targetRoles}
           onChange={(v) => update("targetRoles", v)}
         />
@@ -335,7 +335,7 @@ export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDir
             {(id) => (
               <input
                 id={id}
-                placeholder="Providence, RI"
+                placeholder="City and state, or ZIP code"
                 value={form.homeLocation}
                 onChange={(e) => update("homeLocation", e.target.value)}
               />
@@ -394,7 +394,7 @@ export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDir
         </div>
         <TagInput
           label="Other locations you'd consider"
-          placeholder="Boston, MA"
+          placeholder="Another city or ZIP code"
           values={form.preferredLocations}
           onChange={(v) => update("preferredLocations", v)}
         />
@@ -404,14 +404,14 @@ export default function ProfilePage({ profile, loaded, onMessage, onSaved, onDir
         <legend>Skills and credentials</legend>
         <TagInput
           label="Skills"
-          hint="Tools, languages, and techniques"
-          placeholder="Splunk"
+          hint="Skills, tools, and software you use"
+          placeholder="A skill, tool, or software"
           values={form.skills}
           onChange={(v) => update("skills", v)}
         />
         <TagInput
-          label="Certifications"
-          placeholder="CompTIA Security+"
+          label="Certifications and licenses"
+          placeholder="A certification or license"
           values={form.certifications}
           onChange={(v) => update("certifications", v)}
         />

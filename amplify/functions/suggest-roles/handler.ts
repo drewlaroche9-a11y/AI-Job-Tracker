@@ -51,7 +51,7 @@ Return 8 suggestions:
 - 2 "stretch": roles that pay more or advance their career, reachable by closing one specific gap.
 
 Rules:
-- Use common titles that employers actually post on job boards (for example "SOC Analyst", not invented titles).
+- Use common titles that employers actually post on job boards (for example "Registered Nurse" or "Marketing Coordinator", not invented titles). Suggest roles in the candidate's own field, whatever it is.
 - Do not repeat the candidate's existing target roles exactly.
 - Respect their experience level. Do not suggest senior, staff, principal, or lead titles for intern or entry-level candidates, except as a stretch role with the gap named.
 - If they set a minimum salary, favor roles that commonly meet it in the US. Do not state salary numbers; real market data is added separately.
